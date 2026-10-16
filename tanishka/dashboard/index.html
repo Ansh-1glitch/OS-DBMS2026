@@ -1,12 +1,264 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <meta charset="utf-8">
-    <title>OSDBMS Sentinel</title>
-    <link rel="stylesheet" href="style.css">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OSDBMS Sentinel</title>
+<style>
+body {
+    font-family: Arial, sans-serif;
+    background: #f4f4f4;
+    color: #222;
+    margin: 0;
+    padding: 16px;
+}
+h1 {
+    font-size: 22px;
+    margin: 0 0 16px 0;
+}
+h2 {
+    font-size: 16px;
+    margin: 0 0 8px 0;
+}
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 16px;
+}
+.panel {
+    background: #ffffff;
+    border: 1px solid #cccccc;
+    border-radius: 4px;
+    padding: 12px;
+    overflow-x: auto;
+}
+table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 14px;
+}
+th, td {
+    border: 1px solid #bbbbbb;
+    padding: 4px 6px;
+    text-align: left;
+}
+th {
+    background: #e8e8e8;
+}
+.msg {
+    color: #555;
+    font-size: 14px;
+}
+.error {
+    color: #b00000;
+    font-size: 14px;
+}
+ul {
+    margin: 0;
+    padding-left: 20px;
+    font-family: monospace;
+}
+button {
+    padding: 6px 12px;
+    margin: 0 8px 8px 0;
+    font-size: 14px;
+    cursor: pointer;
+}
+#result {
+    border: 1px solid #bbbbbb;
+    padding: 8px;
+    font-family: monospace;
+    font-size: 14px;
+    min-height: 20px;
+}
+</style>
 </head>
 <body>
-    <h1>OSDBMS Sentinel</h1>
-    <script src="app.js"></script>
+<h1>OSDBMS Sentinel</h1>
+<div class="grid">
+    <div class="panel">
+        <h2>Locks and wait queues</h2>
+        <div id="locks"></div>
+    </div>
+    <div class="panel">
+        <h2>Waits-for pairs</h2>
+        <div id="graph"></div>
+    </div>
+    <div class="panel">
+        <h2>Deadlock events</h2>
+        <div id="deadlocks"></div>
+    </div>
+    <div class="panel">
+        <h2>Security alerts</h2>
+        <div id="alerts"></div>
+    </div>
+    <div class="panel">
+        <h2>Lost update demo</h2>
+        <button id="btn-without">Run without locks</button>
+        <button id="btn-with">Run with locks</button>
+        <div id="result"></div>
+    </div>
+</div>
+<script>
+var routes = {
+    locks: "/api/locks",
+    graph: "/api/graph",
+    deadlocks: "/api/deadlocks",
+    alerts: "/api/alerts",
+    demoWithout: "/api/demo/without_locks",
+    demoWith: "/api/demo/with_locks"
+};
+
+function clear(box) {
+    while (box.firstChild) {
+        box.removeChild(box.firstChild);
+    }
+}
+
+function showText(boxId, text, cls) {
+    var box = document.getElementById(boxId);
+    clear(box);
+    var p = document.createElement("p");
+    p.className = cls;
+    p.textContent = text;
+    box.appendChild(p);
+}
+
+function makeTable(headers, rows) {
+    var table = document.createElement("table");
+    var tr = document.createElement("tr");
+    for (var i = 0; i < headers.length; i++) {
+        var th = document.createElement("th");
+        th.textContent = headers[i];
+        tr.appendChild(th);
+    }
+    table.appendChild(tr);
+    for (var r = 0; r < rows.length; r++) {
+        var row = document.createElement("tr");
+        for (var c = 0; c < rows[r].length; c++) {
+            var td = document.createElement("td");
+            td.textContent = rows[r][c];
+            row.appendChild(td);
+        }
+        table.appendChild(row);
+    }
+    return table;
+}
+
+function showTable(boxId, headers, rows, emptyText) {
+    if (rows.length === 0) {
+        showText(boxId, emptyText, "msg");
+        return;
+    }
+    var box = document.getElementById(boxId);
+    clear(box);
+    box.appendChild(makeTable(headers, rows));
+}
+
+function listText(items) {
+    if (!items || items.length === 0) {
+        return "-";
+    }
+    return items.join(", ");
+}
+
+function timeText(seconds) {
+    return new Date(seconds * 1000).toLocaleTimeString();
+}
+
+function getJson(url, boxId, draw) {
+    fetch(url).then(function (res) {
+        if (!res.ok) {
+            throw new Error("bad status");
+        }
+        return res.json();
+    }).then(draw).catch(function () {
+        showText(boxId, "server not reachable", "error");
+    });
+}
+
+function drawLocks(data) {
+    var rows = [];
+    for (var i = 0; i < data.length; i++) {
+        var lock = data[i];
+        rows.push([lock.resource, lock.mode, listText(lock.holders), listText(lock.waiting)]);
+    }
+    showTable("locks", ["Resource", "Mode", "Holders", "Waiting"], rows, "no locks held");
+}
+
+function drawGraph(data) {
+    var box = document.getElementById("graph");
+    var ul = document.createElement("ul");
+    var count = 0;
+    for (var waiter in data) {
+        var holders = data[waiter];
+        for (var i = 0; i < holders.length; i++) {
+            var li = document.createElement("li");
+            li.textContent = waiter + " -> " + holders[i];
+            ul.appendChild(li);
+            count = count + 1;
+        }
+    }
+    if (count === 0) {
+        showText("graph", "nobody is waiting", "msg");
+        return;
+    }
+    clear(box);
+    box.appendChild(ul);
+}
+
+function drawDeadlocks(data) {
+    var rows = [];
+    for (var i = data.length - 1; i >= 0; i--) {
+        var ev = data[i];
+        rows.push([listText(ev.cycle), ev.victim, listText(ev.users), timeText(ev.time)]);
+    }
+    showTable("deadlocks", ["Cycle", "Victim", "Users", "Time"], rows, "no deadlocks yet");
+}
+
+function drawAlerts(data) {
+    var rows = [];
+    for (var i = data.length - 1; i >= 0; i--) {
+        var al = data[i];
+        rows.push([al.user, al.reason, timeText(al.time)]);
+    }
+    showTable("alerts", ["User", "Reason", "Time"], rows, "no alerts");
+}
+
+function drawResult(data) {
+    var text = "start: " + data.start + "  expected: " + data.expected +
+        "  final: " + data.final + "  lost: " + data.lost;
+    showText("result", text, "msg");
+}
+
+function runDemo(url) {
+    showText("result", "running...", "msg");
+    fetch(url, { method: "POST" }).then(function (res) {
+        if (!res.ok) {
+            throw new Error("bad status");
+        }
+        return res.json();
+    }).then(drawResult).catch(function () {
+        showText("result", "server not reachable", "error");
+    });
+}
+
+function refresh() {
+    getJson(routes.locks, "locks", drawLocks);
+    getJson(routes.graph, "graph", drawGraph);
+    getJson(routes.deadlocks, "deadlocks", drawDeadlocks);
+    getJson(routes.alerts, "alerts", drawAlerts);
+}
+
+document.getElementById("btn-without").onclick = function () {
+    runDemo(routes.demoWithout);
+};
+document.getElementById("btn-with").onclick = function () {
+    runDemo(routes.demoWith);
+};
+
+refresh();
+setInterval(refresh, 2000);
+</script>
 </body>
 </html>
